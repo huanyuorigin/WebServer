@@ -27,8 +27,13 @@ bool HttpRequest::IsKeepAlive() const {
     return false;
 }
 
-bool HttpRequest::parse(Buffer& buff) {
+bool HttpRequest::parse(Buffer& buff,int iSocketFd) {
     const char CRLF[] = "\r\n";
+    const char CRLFEND[] = "\r\n\r\n";
+    const char* lineEnd = search(buff.Peek(), buff.BeginWriteConst(), CRLFEND, CRLFEND + 4);
+    ssize_t iHeadLen = lineEnd-buff.Peek()+4;
+    std::cout<<iHeadLen<<endl;
+    fflush(stdout);
     if(buff.ReadableBytes() <= 0) {
         return false;
     }
@@ -50,7 +55,14 @@ bool HttpRequest::parse(Buffer& buff) {
             }
             break;
         case BODY:
+            ReciveBody_(buff,iSocketFd,iHeadLen);
+
+            // break;
+            std::cout<<"ok"<<endl;
+        
             ParseBody_(line);
+            buff.RetrieveAll();
+            lineEnd = buff.BeginWrite();
             break;
         default:
             break;
@@ -60,6 +72,40 @@ bool HttpRequest::parse(Buffer& buff) {
     }
     LOG_DEBUG("[%s], [%s], [%s]", method_.c_str(), path_.c_str(), version_.c_str());
     return true;
+}
+
+int HttpRequest::ReciveBody_(Buffer& buff,int iSocketFd,ssize_t iHeadLen){
+    int iRet = -1;
+    do
+    {
+        std::string strContentLen = "0";
+        if(method_ == "POST" &&header_.count("Content-Length") == 1) {
+            strContentLen = header_.find("Content-Length")->second;
+            ssize_t iConLen = atol(strContentLen.c_str());
+            std::cout<<iConLen<<endl;
+            iConLen -= 1024-iHeadLen;
+            std::cout<<iConLen<<endl;
+            char buf[512];
+            while (iConLen>0)
+            {
+                memset(buf,0,512);
+                /* code */
+                int iLen =  readn(iSocketFd,buf,512);
+                buff.Append(buf,iLen);
+                iConLen-=iLen;
+            }
+            std::cout<<buff.ReadableBytes()<<endl;
+            std::cout<<buff.Peek()<<endl;
+            fflush(stdout);
+            
+        }
+        
+        state_ = BODY;
+        iRet = 0;
+    } while (0);
+    
+    return iRet;
+    
 }
 
 void HttpRequest::ParsePath_() {
@@ -102,6 +148,7 @@ void HttpRequest::ParseHeader_(const string& line) {
 }
 
 void HttpRequest::ParseBody_(const string& line) {
+    std::cout<<"ParseBody"<<endl;
     body_ = line;
     ParsePost_();
     state_ = FINISH;
@@ -115,6 +162,7 @@ int HttpRequest::ConverHex(char ch) {
 }
 
 void HttpRequest::ParsePost_() {
+    std::cout<<"ParsePost"<<endl;
     if(method_ == "POST" && header_["Content-Type"] == "application/x-www-form-urlencoded") {
         ParseFromUrlencoded_();
         if(DEFAULT_HTML_TAG.count(path_)) {
