@@ -1,140 +1,196 @@
-/*
- * @Author       : mark
- * @Date         : 2020-06-15
- * @copyleft Apache 2.0
- */ 
-#include "httpconn.h"
-using namespace std;
+#include "HttpConn.h"
 
-const char* HttpConn::srcDir;
+const char *HttpConn::srcDir;
 std::atomic<int> HttpConn::userCount;
 bool HttpConn::isET;
 
-HttpConn::HttpConn() { 
-    fd_ = -1;
-    addr_ = { 0 };
+HttpConn::HttpConn(/* args */)
+{
+    httpDeal.init(&readBuff_, &writeBuff_);
+    iSocketFd_ = -1;
+    struAddr_ = {0};
     isClose_ = true;
-};
-
-HttpConn::~HttpConn() { 
-    Close(); 
-};
-
-void HttpConn::init(int fd, const sockaddr_in& addr) {
-    assert(fd > 0);
-    userCount++;
-    addr_ = addr;
-    fd_ = fd;
-    writeBuff_.RetrieveAll();
-    readBuff_.RetrieveAll();
-    isClose_ = false;
-    LOG_INFO("Client[%d](%s:%d) in, userCount:%d", fd_, GetIP(), GetPort(), (int)userCount);
 }
 
-void HttpConn::Close() {
-    response_.UnmapFile();
-    if(isClose_ == false){
-        isClose_ = true; 
+HttpConn::~HttpConn()
+{
+    Close();
+}
+
+void HttpConn::Close()
+{
+    if (isClose_ == false)
+    {
+        isClose_ = true;
         userCount--;
-        close(fd_);
-        LOG_INFO("Client[%d](%s:%d) quit, UserCount:%d", fd_, GetIP(), GetPort(), (int)userCount);
+        close(iSocketFd_);
+        DEBUG_I("Client[" << iSocketFd_ << "](" << GetIP() << ":" << GetPort() << ") quit, UserCount:" << (int)userCount);
     }
 }
 
-int HttpConn::GetFd() const {
-    return fd_;
+int HttpConn::GetFd() const
+{
+    return iSocketFd_;
 };
 
-struct sockaddr_in HttpConn::GetAddr() const {
-    return addr_;
+struct sockaddr_in HttpConn::GetAddr() const
+{
+    return struAddr_;
 }
 
-const char* HttpConn::GetIP() const {
-    return inet_ntoa(addr_.sin_addr);
+const char *HttpConn::GetIP() const
+{
+    return inet_ntoa(struAddr_.sin_addr);
 }
 
-int HttpConn::GetPort() const {
-    return addr_.sin_port;
+int HttpConn::GetPort() const
+{
+    return struAddr_.sin_port;
 }
 
-ssize_t HttpConn::read(int* saveErrno) {
-    ssize_t len = -1;
-    do {
-        len = readn(fd_,readBuff_.BeginWrite(),1024);
-        if(0>len){
+int HttpConn::init(int iFd, const sockaddr_in &struAddr)
+{
+    int iRet = -1;
+    do
+    {
+        if (0 > iFd)
+        {
+            iRet = -1;
             break;
+        }
+        userCount++;
+        struAddr_ = struAddr;
+        iSocketFd_ = iFd;
+        writeBuff_.RetrieveAll();
+        readBuff_.RetrieveAll();
+        isClose_ = false;
+        DEBUG_I("Client[" << iSocketFd_ << "](" << GetIP() << ":" << GetPort() << ") in, userCount:" << (int)userCount);
+        iRet = 0;
+    } while (0);
+    return iRet;
+}
+
+ssize_t HttpConn::read(int &saveErrno)
+{
+    ssize_t len = -1;
+    char buff[512]; // 栈区
+    do
+    {
+        memset(buff, 0, 512);
+        do
+        {
+            len = readn(iSocketFd_, buff, 512);
+            if (len <= 0)
+            {
+                saveErrno = errno;
+                break;
+            }
+            DEBUG_D(len);
+            std::string strHead(buff);
+            size_t iIndex = strHead.find("\r\n\r\n");
+            if (std::string::npos != iIndex)
+            {
+                iIndex += 4;
+                DEBUG_D(iIndex);
+            }
+            else
+            {
+                break;
+            }
+            readBuff_.Append(buff, len);
+
+            std::string strKey;
+            if (0 == findStringKey(strHead, "Content-Length: ", "\r\n", strKey))
+            {
+                ssize_t iContentLen = atol(strKey.c_str());
+                int iLeft = iContentLen + iIndex - 512;
+                DEBUG_D(iLeft);
+
+                if (iLeft > 0)
+                {
+                    char buf[512];
+                    
+                    while (iLeft > 0)
+                    {
+                        memset(buf,0,512);
+                        int len = readn(iSocketFd_, buf, 512);
+                        readBuff_.Append(buf,len);
+                        DEBUG_D(iLeft);
+                        iLeft -= len;
+                    }
+
+                }
+            }
+            else
+            {
+                break;
+            }
+
+            DEBUG_D(iIndex);
+
+        } while (0);
+        if (len <= 0)
+        {
+            break;
+        }
+
+    } while (isET);
+
+    DEBUG_D(readBuff_.ReadableBytes());
+    return len;
+}
+ssize_t HttpConn::write(int *saveErrno)
+{
+    ssize_t len = -1;
+    do
+    {
+        /* code */
+
+        len = send(iSocketFd_, writeBuff_.Peek(), writeBuff_.ReadableBytes(), 0); // 将iov的内容写到fd中
+        if (len <= 0)
+        {
             *saveErrno = errno;
-        }else if(len == 0){
+            break;
+        }
+        else if (len == writeBuff_.ReadableBytes())
+        {
+            DEBUG_D("writelen" << len);
+            writeBuff_.RetrieveAll();
+            
             break;
         }
         else
         {
-            /* code */
-            readBuff_.HasWritten(len);
-            break;
-        }
-        
-        // len = readBuff_.ReadFd(fd_, saveErrno);
-        // if (len <= 0) {
-        //     break;
-        // }
-    } while (isET);
-    // std::cout<<"now:"<<readBuff_.ReadableBytes()<<std::endl;
-    // std::cout<<"now:"<<readBuff_.Peek()<<std::endl;
-    // fflush(stdout);
-    return len;
-}
-
-ssize_t HttpConn::write(int* saveErrno) {
-    ssize_t len = -1;
-    do {
-        len = writev(fd_, iov_, iovCnt_);
-        if(len <= 0) {
-            *saveErrno = errno;
-            break;
-        }
-        if(iov_[0].iov_len + iov_[1].iov_len  == 0) { break; } /* 传输结束 */
-        else if(static_cast<size_t>(len) > iov_[0].iov_len) {
-            iov_[1].iov_base = (uint8_t*) iov_[1].iov_base + (len - iov_[0].iov_len);
-            iov_[1].iov_len -= (len - iov_[0].iov_len);
-            if(iov_[0].iov_len) {
-                writeBuff_.RetrieveAll();
-                iov_[0].iov_len = 0;
-            }
-        }
-        else {
-            iov_[0].iov_base = (uint8_t*)iov_[0].iov_base + len; 
-            iov_[0].iov_len -= len; 
             writeBuff_.Retrieve(len);
         }
-    } while(isET || ToWriteBytes() > 10240);
+        if (0 == writeBuff_.ReadableBytes())
+        {
+            break;
+        }
+    } while (isET);
     return len;
 }
+// 写的总长度
+int HttpConn::ToWriteBytes()
+{
+    return writeBuff_.ReadableBytes();
+}
 
-bool HttpConn::process() {
-    request_.Init();
-    if(readBuff_.ReadableBytes() <= 0) {
+bool HttpConn::IsKeepAlive() const
+{
+    return httpDeal.IsKeepAlive();
+}
+
+bool HttpConn::process()
+{
+    if (readBuff_.ReadableBytes() <= 0)
+    {
         return false;
     }
-    else if(request_.parse(readBuff_,fd_)) {
-        LOG_DEBUG("%s", request_.path().c_str());
-        response_.Init(srcDir, request_.path(), request_.IsKeepAlive(), 200);
-    } else {
-        response_.Init(srcDir, request_.path(), false, 400);
-    }
-
-    response_.MakeResponse(writeBuff_);
-    /* 响应头 */
-    iov_[0].iov_base = const_cast<char*>(writeBuff_.Peek());
-    iov_[0].iov_len = writeBuff_.ReadableBytes();
-    iovCnt_ = 1;
-
-    /* 文件 */
-    if(response_.FileLen() > 0  && response_.File()) {
-        iov_[1].iov_base = response_.File();
-        iov_[1].iov_len = response_.FileLen();
-        iovCnt_ = 2;
-    }
-    LOG_DEBUG("filesize:%d, %d  to %d", response_.FileLen() , iovCnt_, ToWriteBytes());
+    httpDeal.processHttp();
+    // std::string strHeaderRe = "HTTP/1.1 200 ok\r\n"
+    //                           "Content-Length: 0\r\n\r\n";
+    // writeBuff_.Append(strHeaderRe);
+    DEBUG_D("prcess");
     return true;
 }
