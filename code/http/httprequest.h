@@ -18,6 +18,7 @@
 #include "../pool/sqlconnpool.h"
 #include "../pool/sqlconnRAII.h"
 #include "socket.h"
+#include "../cJson/cJSON.h"
 class HttpRequest {
 public:
     enum PARSE_STATE {
